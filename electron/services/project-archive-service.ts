@@ -710,7 +710,7 @@ function projectGenerationBudget(value: unknown): Record<string, unknown> {
     maxPhysicalRequests: safeInteger(budget.maxPhysicalRequests, 1),
     maxTokenLiability: safeInteger(budget.maxTokenLiability, 1),
     maxOutputPerRequest: safeInteger(budget.maxOutputPerRequest, 1),
-    maxActiveElapsedMs: safeInteger(budget.maxActiveElapsedMs, 1),
+    maxActiveElapsedMs: safeInteger(budget.maxActiveElapsedMs, 0),
   }
 }
 

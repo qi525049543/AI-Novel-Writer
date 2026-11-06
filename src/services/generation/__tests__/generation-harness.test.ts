@@ -676,7 +676,7 @@ describe('GenerationHarness', () => {
     expect(JSON.stringify(recovered.receipt)).not.toContain('test-only-key')
   })
 
-  it('freezes the global attempt, requested-token, and deadline budget against caller mutation', async () => {
+  it('freezes attempt and token budgets while ignoring legacy deadlines', async () => {
     let currentTime = 1000
     const complete = vi.fn<CompletionPort['complete']>().mockResolvedValue({
       content: 'complete',
@@ -711,18 +711,16 @@ describe('GenerationHarness', () => {
       cumulativeRequestedOutputTokens: 5000,
       maxRequestedOutputTokens: 5000,
       maxRequestedOutputTokensPerAttempt: 4096,
-      deadlineAt: 61_000,
+      deadlineAt: 0,
     })
     await expect(session.complete(task())).rejects.toMatchObject({
       code: 'ATTEMPT_BUDGET_EXHAUSTED',
     })
 
     const expired = harness.openSession()
-    currentTime = 61_001
-    await expect(expired.complete(task())).rejects.toMatchObject({
-      code: 'DEADLINE_EXHAUSTED',
-    })
-    expect(complete).toHaveBeenCalledTimes(2)
+    currentTime = 7_200_001
+    await expect(expired.complete(task())).resolves.toMatchObject({ status: 'completed' })
+    expect(complete).toHaveBeenCalledTimes(3)
   })
 
   it('cancels an in-flight physical request while preserving its charged attempt receipt', async () => {
@@ -763,6 +761,33 @@ describe('GenerationHarness', () => {
       },
     })
     expect(providerSignal?.aborted).toBe(true)
+  })
+
+  // 用虚拟时钟验证无限等待和取消，不实际等待数小时，也不发起服务商请求。
+  it.each([0, 3_600_000])('长请求超过两小时仍等待，手动取消可结束忽略信号的服务商：%s', async deadlineMs => {
+    vi.useFakeTimers()
+    try {
+      let providerSignal!: AbortSignal
+      const harness = createGenerationHarness({
+        modelSource: { snapshotDefaultModel: () => ({ revision: 'revision-a', model: model() }) },
+        completionPort: { complete: async request => {
+          providerSignal = request.signal
+          return new Promise(() => {})
+        } },
+        policy: { maxAttempts: 2, maxRequestedOutputTokens: 10_000,
+          maxRequestedOutputTokensPerAttempt: 4096, deadlineMs },
+      })
+      const cancellation = new AbortController()
+      const pending = harness.openSession().complete(task(), { signal: cancellation.signal })
+      let settled = false
+      const result = pending.then(value => { settled = true; return value }, error => { settled = true; return error })
+      await vi.advanceTimersByTimeAsync(7_200_001)
+      expect(settled).toBe(false)
+      expect(providerSignal.aborted).toBe(false)
+      cancellation.abort()
+      expect(await result).toMatchObject({ code: 'CANCELLED', receipt: { finishReason: 'cancelled', budget: { deadlineAt: 0 } } })
+      expect(providerSignal.aborted).toBe(true)
+    } finally { vi.useRealTimers() }
   })
 
   it('does not charge a physical attempt when cancellation already exists before planning', async () => {

@@ -1,4 +1,4 @@
-/** Persisted, resumable reference-import workflow. */
+/** 编排参考小说与作者原稿导入，沿持久检查点恢复；已保存正文不重做，失败生成仅由显式继续触发。 */
 import type { ProjectSessionContext } from '../../shared/ipc-channels'
 import {
   assertImportRunEffectReceiptMetadata,
@@ -27,6 +27,7 @@ import { retryDirectoryCharacterSync } from './directory-character-sync-recovery
 import type { WritingLanguage } from '../../shared/writing-language'
 import { countDraftUnits } from '../../shared/draft-units'
 import { FINALIZATION_SHARED_WRITE_RESOURCE_KINDS } from '../../shared/workflow-resource-claims'
+import { describeFinalizationStepError, finalizationStepErrorCode } from '../../shared/finalization-step-error'
 
 export interface ImportWorkflowParams {
   projectPath: string
@@ -118,6 +119,7 @@ function currentNovelConfigSummary(writingLanguage: WritingLanguage): string {
 function productionDependencies(
   context: WorkflowContext,
   callbacks: StepCallbacks,
+  retryAuthorPostprocess: boolean,
 ): ImportRunOrchestratorDependencies {
   const session = context.projectSession
   const projectPath = context.projectPath
@@ -389,7 +391,19 @@ function productionDependencies(
         ),
         stopOnFailure: true,
         onlyFailed: true,
-      }).execute({ step: {} as never, context, callbacks })
+        // 在用户继续停于后处理的导入时，沿用单章恢复机制冻结失败 attempt；内部自动重试复用同一幂等键。
+        retryInvalidResult: retryAuthorPostprocess,
+      }).execute({ step: {} as never, context, callbacks }).catch(error => {
+        const message = error instanceof Error ? error.message : String(error)
+        // 流水线包装了步骤名称；只翻译已登记的尾部错误码，保留其他错误的原始语义。
+        const code = finalizationStepErrorCode(message.split(' — ').at(-1) ?? message)
+        if (!code) throw error
+        const reason = describeFinalizationStepError(code,
+          (zh, en) => textForLocale(run.locale, zh, en), 'continue-import')
+        throw new Error(textForLocale(run.locale,
+          `第 ${chapter.number} 章连续性后处理未完成：${reason}`,
+          `Continuity post-processing did not complete for Chapter ${chapter.number}: ${reason}`), { cause: error })
+      })
       if (!status.allCriticalPassed) {
         throw new Error(textForLocale(
           run.locale,
@@ -462,7 +476,9 @@ function importStep(
     name: textForLocale(run.locale, ...name),
     description: textForLocale(run.locale, ...description),
     executor: async (_step: WorkflowStep, context: WorkflowContext, callbacks: StepCallbacks) => {
-      await new ImportRunOrchestrator(productionDependencies(context, callbacks))
+      // 使用创建工作流时的阶段快照，不能因同次执行中发生失败而自动获得重新请求授权。
+      const retryAuthorPostprocess = stage === 'author-postprocess' && run.stage === 'author-postprocess'
+      await new ImportRunOrchestrator(productionDependencies(context, callbacks, retryAuthorPostprocess))
         .executeStage(run.id, stage, executionOwner, context, callbacks)
     },
   }

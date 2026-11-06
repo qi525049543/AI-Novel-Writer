@@ -1,9 +1,17 @@
+/** 协调定稿后处理的生成、恢复与提交；只由显式重试发新请求，回放保留服务商失败原因。 */
 import { ipc } from './ipc-client'
 import type { ProjectSessionContext } from '../shared/ipc-channels'
 import type { FinalizationGenerationSlot, FinalizationGenerationRecovery } from '../shared/finalization-generation'
 import type { FinalizedCharacterArtifact } from '../shared/finalized-character-generation'
 import type { MainGenerationRunHandle } from './generation/generation-runtime'
 import { isTerminalProviderFailure, throwIfTerminalProviderFailure } from './generation/generation-harness'
+
+/** 仅从主进程安全诊断分类，不把服务商原始响应、地址或凭据带入步骤错误。 */
+function recordedRequestFailure(failureCode?: string | null, httpStatus?: number): string | undefined {
+  if (httpStatus === 503) return 'FINALIZATION_GENERATION_SERVICE_UNAVAILABLE'
+  if (failureCode === 'GENERATION_PROVIDER_FAILED' || failureCode === 'NETWORK_ERROR') return 'FINALIZATION_GENERATION_INCOMPLETE'
+  return undefined
+}
 
 /** Reuses one durable main slot. Saved effects never rebuild prompts or execute. */
 export async function runFinalizationGeneration(options: {
@@ -63,12 +71,23 @@ export async function runFinalizationGeneration(options: {
       recovery.view = receipt.run
       if (options.cancelled()) { await cancel(); throw new Error('GENERATION_WORKFLOW_CANCELLED') }
       throwIfTerminalProviderFailure(receipt.outcome.receipt)
-      if (receipt.outcome.status !== 'completed' || receipt.outcome.finishReason !== 'stop') throw new Error('FINALIZATION_GENERATION_INCOMPLETE')
+      if (receipt.outcome.status !== 'completed' || receipt.outcome.finishReason !== 'stop') {
+        throw new Error(recordedRequestFailure(receipt.outcome.receipt.failureCode, receipt.outcome.receipt.diagnostics?.httpStatus)
+          ?? 'FINALIZATION_GENERATION_INCOMPLETE')
+      }
       candidates = receipt.run.candidates ?? receipt.run.artifacts
       const reference = receipt.outcome.receipt.visibleArtifact
       candidate = candidates.find(item => item.artifactId === reference?.artifactId && item.revision === reference.revision && item.textHash === reference.textHash)
     }
     if (!candidate || candidate.status !== 'completed' || candidate.compositionEligible !== true) {
+      // 内部重试只回放同一请求，不能用“未发新请求”覆盖它已记录的 HTTP/网络失败。
+      // 章节要点与角色状态共享根；诊断必须匹配本步骤最近一次 attempt。
+      const latest = recovery.latestAttempt
+      if (latest && !latest.inFlight) {
+        const failed = candidates.find(item => item.attemptId === latest.attemptId)
+        const failure = recordedRequestFailure(latest.failureCode, failed?.diagnostics?.httpStatus)
+        if (failure) throw new Error(failure)
+      }
       // 本次已发请求、或回放的是模型正常结束的候选：模型确实返回过结果，只是不可用，不能说成没发请求。
       throw new Error(executed || candidate?.status === 'completed' ? 'FINALIZATION_GENERATION_RESULT_UNUSABLE' : 'FINALIZATION_GENERATION_ARTIFACT_REQUIRED')
     }

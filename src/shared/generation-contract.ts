@@ -48,6 +48,7 @@ export interface PhysicalAttempt {
 }
 export interface RootBudget {
   maxPhysicalRequests: number; maxTokenLiability: number; maxOutputPerRequest: number
+  /** 兼容历史预算；新预算为 0（无限时），旧正值也不再用于中止或拒绝请求。 */
   maxActiveElapsedMs: number
 }
 export interface ProviderUsagePolicy {
@@ -72,8 +73,8 @@ export function tokenLiability(attempt: PhysicalAttempt): number {
 /** Must run in the root ledger transaction before inserting a unique reservation. */
 export function assertReservation(root: RootAction, policy: RootBudget, attempts: readonly PhysicalAttempt[], next: PhysicalAttempt, elapsedMs: number): void {
   rootActionIdempotencyKey(root)
-  const integers = [policy.maxPhysicalRequests, policy.maxTokenLiability, policy.maxOutputPerRequest, policy.maxActiveElapsedMs, next.reservedTokens, next.requestedOutputTokens]
-  if (integers.some(value => !Number.isSafeInteger(value) || value <= 0) || !Number.isSafeInteger(elapsedMs) || elapsedMs < 0) throw new Error('INVALID_BUDGET')
+  const integers = [policy.maxPhysicalRequests, policy.maxTokenLiability, policy.maxOutputPerRequest, next.reservedTokens, next.requestedOutputTokens]
+  if (integers.some(value => !Number.isSafeInteger(value) || value <= 0) || !Number.isSafeInteger(policy.maxActiveElapsedMs) || policy.maxActiveElapsedMs < 0 || !Number.isSafeInteger(elapsedMs) || elapsedMs < 0) throw new Error('INVALID_BUDGET')
   if (root.status !== 'active' || next.rootActionId !== root.rootActionId || !next.attemptId || !next.reservationId || next.status !== 'reserved') throw new Error('INVALID_RESERVATION')
   if (next.requestedOutputTokens > policy.maxOutputPerRequest || next.reservedTokens < next.requestedOutputTokens) throw new Error('INVALID_OUTPUT_RESERVATION')
   if (attempts.some(item => item.rootActionId !== root.rootActionId || item.attemptId === next.attemptId || item.reservationId === next.reservationId)) throw new Error('RESERVATION_CONFLICT')
@@ -82,9 +83,8 @@ export function assertReservation(root: RootAction, policy: RootBudget, attempts
   if (new Set(attempts.map(item => item.attemptId)).size !== attempts.length
     || new Set(attempts.map(item => item.reservationId)).size !== attempts.length
     || attempts.some(item => !['reserved', 'dispatch-marked', 'settled', 'unknown', 'cancelled-before-dispatch'].includes(item.status))) throw new Error('INVALID_LEDGER')
-  // token 只记账不刹车（ADR-0023）。
-  if (attempts.filter(item => item.status !== 'cancelled-before-dispatch').length >= policy.maxPhysicalRequests
-    || elapsedMs >= policy.maxActiveElapsedMs) throw new Error('ROOT_BUDGET_EXHAUSTED')
+  // token 和活动时长只记账；旧预算里的时长正值也不再限制恢复后的请求。
+  if (attempts.filter(item => item.status !== 'cancelled-before-dispatch').length >= policy.maxPhysicalRequests) throw new Error('ROOT_BUDGET_EXHAUSTED')
 }
 export function assertAttemptTransition(before: PhysicalAttempt['status'], after: PhysicalAttempt['status']): void {
   if (!(before === 'reserved' && ['dispatch-marked', 'cancelled-before-dispatch'].includes(after)

@@ -287,7 +287,7 @@ export class GenerationRunRepository {
                 action = parent.root;
             }
             else {
-                if (['maxPhysicalRequests', 'maxTokenLiability', 'maxOutputPerRequest', 'maxActiveElapsedMs'].some(key => { const value = request.budget[key as keyof RootBudget]; return !Number.isSafeInteger(value) || value <= 0; }))
+                if (['maxPhysicalRequests', 'maxTokenLiability', 'maxOutputPerRequest', 'maxActiveElapsedMs'].some(key => { const value = request.budget[key as keyof RootBudget]; return !Number.isSafeInteger(value) || (key === 'maxActiveElapsedMs' ? value < 0 : value <= 0); }))
                     fail('INVALID_BUDGET');
                 this.db().prepare('INSERT INTO generation_roots(root_action_id,idempotency_key,action_json,budget_json) VALUES(?,?,?,?)').run(action.rootActionId, key, encode(action), encode(request.budget));
             }
@@ -401,7 +401,7 @@ export class GenerationRunRepository {
         this.transaction(() => {
             const receipt = this.receipt(attemptId);
             this.assertBlueprintRecoveryWritable(receipt.run.runId);
-            if (receipt.budget.activeElapsedMs >= receipt.budget.policy.maxActiveElapsedMs || receipt.budget.root.status !== 'active' || receipt.budget.blockedCode)
+            if (receipt.budget.root.status !== 'active' || receipt.budget.blockedCode)
                 fail('GENERATION_DISPATCH_BLOCKED');
             assertAttemptTransition(receipt.attempt.status, 'dispatch-marked');
             const stored = JSON.parse(this.db().prepare('SELECT usage_receipt_json FROM generation_attempts WHERE attempt_id=?').pluck().get(attemptId) as string);

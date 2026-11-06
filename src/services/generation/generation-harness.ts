@@ -96,6 +96,7 @@ export interface GenerationHarnessPolicy {
   maxRequestedOutputTokens: number
   /** Intent-level cost cap for one physical request; independent of model identity. */
   maxRequestedOutputTokensPerAttempt: number
+  /** 兼容旧调用参数；0 表示无限时，历史正值也不再触发自动截止。 */
   deadlineMs: number
 }
 
@@ -107,7 +108,7 @@ export const GENERATION_ABSOLUTE_BUDGET_LIMITS = Object.freeze({
   maxAttempts: 32,
   maxRequestedOutputTokens: 147_456,
   maxRequestedOutputTokensPerAttempt: 32_768,
-  deadlineMs: 60 * 60_000,
+  deadlineMs: 0,
 })
 
 export type CapabilityEvidenceSource = ModelExecutionCapabilityEvidenceSource
@@ -137,6 +138,7 @@ export interface PhysicalGenerationPlan {
   maxOutputTokens: number
   contextWindowTokens: number | null
   estimatedInputTokens: number
+  /** 0 表示不设截止时间。 */
   deadlineAt: number
   responseFormat?: { type: 'json_object' }
 }
@@ -180,6 +182,7 @@ export interface GenerationAttemptReceipt {
     cumulativeRequestedOutputTokens: number
     maxRequestedOutputTokens: number
     maxRequestedOutputTokensPerAttempt: number
+    /** 0 表示不设截止时间。 */
     deadlineAt: number
   }
   finishReason: LLMFinishReason
@@ -238,6 +241,7 @@ export interface GenerationSessionBudget {
   maxAttempts: number
   maxRequestedOutputTokens: number
   maxRequestedOutputTokensPerAttempt: number
+  /** 0 表示不设截止时间。 */
   deadlineAt: number
 }
 
@@ -438,16 +442,15 @@ export function assertGenerationHarnessPolicy(policy: GenerationHarnessPolicy): 
     positiveInteger(policy.maxAttempts) === null
     || positiveInteger(policy.maxRequestedOutputTokens) === null
     || positiveInteger(policy.maxRequestedOutputTokensPerAttempt) === null
-    || positiveInteger(policy.deadlineMs) === null
+    || !Number.isSafeInteger(policy.deadlineMs) || policy.deadlineMs < 0
   ) {
-    throw new GenerationHarnessError('INVALID_POLICY', '生成会话预算必须是正整数。')
+    throw new GenerationHarnessError('INVALID_POLICY', '生成会话额度必须是正整数，兼容时长字段必须是非负整数。')
   }
   if (
     policy.maxAttempts > GENERATION_ABSOLUTE_BUDGET_LIMITS.maxAttempts
     || policy.maxRequestedOutputTokens > GENERATION_ABSOLUTE_BUDGET_LIMITS.maxRequestedOutputTokens
     || policy.maxRequestedOutputTokensPerAttempt
       > GENERATION_ABSOLUTE_BUDGET_LIMITS.maxRequestedOutputTokensPerAttempt
-    || policy.deadlineMs > GENERATION_ABSOLUTE_BUDGET_LIMITS.deadlineMs
   ) {
     throw new GenerationHarnessError('INVALID_POLICY', '生成会话预算超过应用安全上限。')
   }
@@ -529,7 +532,6 @@ export function createGenerationHarness(dependencies: {
 }): GenerationHarness {
   const { modelSource, completionPort } = dependencies
   const policy = Object.freeze({ ...dependencies.policy })
-  const now = dependencies.now ?? Date.now
   const creativeStrategy = dependencies.creativeStrategy ?? 'auto'
   assertGenerationHarnessPolicy(policy)
 
@@ -564,7 +566,7 @@ export function createGenerationHarness(dependencies: {
         maxAttempts: policy.maxAttempts,
         maxRequestedOutputTokens: policy.maxRequestedOutputTokens,
         maxRequestedOutputTokensPerAttempt: policy.maxRequestedOutputTokensPerAttempt,
-        deadlineAt: now() + policy.deadlineMs,
+        deadlineAt: 0,
       })
       let attempts = 0
       let cumulativeRequestedOutputTokens = 0
@@ -602,9 +604,6 @@ export function createGenerationHarness(dependencies: {
         ): Promise<GenerationOutcome> {
           if (options?.signal?.aborted) {
             throw new GenerationHarnessError('CANCELLED', '生成请求已取消。')
-          }
-          if (now() >= sessionBudget.deadlineAt) {
-            throw new GenerationHarnessError('DEADLINE_EXHAUSTED', '生成会话已超过截止时间。')
           }
           if (attempts >= sessionBudget.maxAttempts) {
             throw new GenerationHarnessError('ATTEMPT_BUDGET_EXHAUSTED', '生成会话已用尽请求次数。')
@@ -684,17 +683,11 @@ export function createGenerationHarness(dependencies: {
           cumulativeRequestedOutputTokens += maxOutputTokens
 
           const controller = new AbortController()
-          const remainingMs = Math.max(1, sessionBudget.deadlineAt - now())
-          let timeoutId: ReturnType<typeof setTimeout> | undefined
-          let termination: 'cancelled' | 'deadline' | null = null
+          // 无自动超时；取消需同时中止传输并结束不响应信号的服务商等待。
+          let termination: 'cancelled' | null = null
           let rejectTermination: ((reason: GenerationHarnessError) => void) | undefined
           const terminationPromise = new Promise<never>((_resolve, reject) => {
             rejectTermination = reject
-            timeoutId = setTimeout(() => {
-              termination = 'deadline'
-              controller.abort()
-              reject(new GenerationHarnessError('DEADLINE_EXHAUSTED', '生成请求超过会话截止时间。'))
-            }, remainingMs)
           })
           const cancel = () => {
             termination = 'cancelled'
@@ -722,16 +715,12 @@ export function createGenerationHarness(dependencies: {
           } catch {
             const cancellationCode = termination === 'cancelled'
               ? 'CANCELLED'
-              : termination === 'deadline'
-                ? 'DEADLINE_EXHAUSTED'
-                : 'PROVIDER_REQUEST_FAILED'
+              : 'PROVIDER_REQUEST_FAILED'
             throw new GenerationAttemptError(
               cancellationCode,
               cancellationCode === 'CANCELLED'
                 ? '生成请求已取消。'
-                : cancellationCode === 'DEADLINE_EXHAUSTED'
-                  ? '生成请求超过会话截止时间。'
-                  : '模型请求失败。',
+                : '模型请求失败。',
               attemptReceipt(
                 task.purpose,
                 attempt,
@@ -742,7 +731,6 @@ export function createGenerationHarness(dependencies: {
               ),
             )
           } finally {
-            if (timeoutId !== undefined) clearTimeout(timeoutId)
             options?.signal?.removeEventListener('abort', cancel)
           }
 

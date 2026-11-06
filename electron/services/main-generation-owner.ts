@@ -204,8 +204,7 @@ export function createMainGenerationOwner(deps: MainGenerationOwnerDependencies)
     if (runAttempts(run.runId).length !== 1 || repository.readVisibleComposition(run.runId) || draftEffects.readCommit(run.runId)
       || !['running', 'paused', 'failed'].includes(run.status) || !['active', 'paused'].includes(budget.root.status)
       || budget.blockedCode || budget.attempts.some(attempt => ['reserved', 'dispatch-marked'].includes(attempt.status))
-      || budget.attempts.filter(attempt => attempt.status !== 'cancelled-before-dispatch').length >= budget.policy.maxPhysicalRequests
-      || budget.activeElapsedMs >= budget.policy.maxActiveElapsedMs)
+      || budget.attempts.filter(attempt => attempt.status !== 'cancelled-before-dispatch').length >= budget.policy.maxPhysicalRequests)
       throw new Error('GENERATION_DRAFT_SHORT_OUTLINE_RETRY_UNAVAILABLE')
     return task
   }
@@ -335,7 +334,7 @@ export function createMainGenerationOwner(deps: MainGenerationOwnerDependencies)
         || !!(plotOutline && repository.readPlotOutlineAuthorEdit(run.runId)),
       budget: { maxAttempts: budget.policy.maxPhysicalRequests, maxRequestedOutputTokens: budget.policy.maxTokenLiability,
         maxRequestedOutputTokensPerAttempt: budget.policy.maxOutputPerRequest,
-        deadlineAt: Date.now() + Math.max(0, budget.policy.maxActiveElapsedMs - budget.activeElapsedMs) },
+        deadlineAt: 0 },
       ledger: { policy: budget.policy, tokenLiability: budget.attempts.reduce((sum, attempt) => sum + tokenLiability(attempt), 0),
         physicalRequests: budget.attempts.filter(attempt => attempt.status !== 'cancelled-before-dispatch').length,
         activeElapsedMs: budget.activeElapsedMs, blockedCode: budget.blockedCode }, artifacts, candidates,
@@ -552,7 +551,7 @@ export function createMainGenerationOwner(deps: MainGenerationOwnerDependencies)
         maxAttempts: budget.policy.maxPhysicalRequests, requestedOutputTokens: receipt.attempt.requestedOutputTokens,
         cumulativeRequestedOutputTokens: budget.attempts.reduce((sum, attempt) => sum + (attempt.status === 'cancelled-before-dispatch' ? 0 : attempt.requestedOutputTokens), 0),
         maxRequestedOutputTokens: budget.policy.maxTokenLiability, maxRequestedOutputTokensPerAttempt: budget.policy.maxOutputPerRequest,
-        deadlineAt: Date.now() + Math.max(0, budget.policy.maxActiveElapsedMs - budget.activeElapsedMs) }, finishReason }
+        deadlineAt: 0 }, finishReason }
     const content = receipt.artifact?.text ?? ''
     return { outcome: finishReason === 'stop' ? { status: 'completed', content, finishReason, receipt: details }
       : { status: 'incomplete', content, finishReason, receipt: details }, run: viewOf(repository.get(receipt.run.runId)) }
@@ -1299,7 +1298,7 @@ export function createMainGenerationOwner(deps: MainGenerationOwnerDependencies)
       }
       const assertRootIdle = () => {
         const budget = repository.budget(run.rootActionId)
-        // 根被阻断时先给出阻断原因（如超时后的 ROOT_BUDGET_EXHAUSTED、写入失败的 GENERATION_STORAGE_FAILED），再点重试也不会解除。
+        // 根被阻断时先给出阻断原因（如请求次数用尽后的 ROOT_BUDGET_EXHAUSTED、写入失败的 GENERATION_STORAGE_FAILED），再点重试也不会解除。
         if (budget.blockedCode) throw new Error(budget.blockedCode)
         if (service.readUnsavedTails().some(tail => repository.receipt(tail.attemptId).run.rootActionId === run.rootActionId)) throw new Error('GENERATION_FINALIZATION_ARTIFACT_INVALID')
         if (!['active', 'paused'].includes(budget.root.status)

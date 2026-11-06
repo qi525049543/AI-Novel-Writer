@@ -32,10 +32,10 @@ function chapter(number: number): ImportRunChapterSnapshot {
   return { number, title: `海港${number}`, content, contentSize: Buffer.byteLength(content), contentFingerprint: hash(content) }
 }
 
-/** 默认根：32 次物理请求、1 小时活动时长。导入根应按整个导入运行的工作量放大。 */
+/** 默认根：32 次物理请求、不限时。导入根的次数按整个导入运行的工作量放大。 */
 function expectedImportRootBudget(chapterCount: number) {
   const requests = 2 * 32 + planBlueprintGenerationCost(chapterCount).recoveryCallBound
-  return { maxPhysicalRequests: requests, maxActiveElapsedMs: 3_600_000 / 32 * requests }
+  return { maxPhysicalRequests: requests, maxActiveElapsedMs: 0 }
 }
 
 function fixture(chapterCount: number, dispatch: GenerationRunServiceDependencies['dispatch'] = stop) {
@@ -147,7 +147,7 @@ it.each(['style', 'blueprints'] as const)('重新开始后第一个 slot 落在 
   if (stage === 'blueprints') expect(f.db.prepare('SELECT user_guidance,notes FROM blueprints WHERE chapter_number=3').get()).toEqual({ user_guidance: '作者补充：信件来自灯塔', notes: '作者批注' })
 }, 180_000)
 
-it('请求进行中活动时长用完时，导入回执把 ROOT_BUDGET_EXHAUSTED 交给渲染端', async () => {
+it('累计活动时长超过一小时后仍可继续导入', async () => {
   const f = fixture(1, async (_request, options) => {
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(resolve, 3000)
@@ -158,8 +158,8 @@ it('请求进行中活动时长用完时，导入回执把 ROOT_BUDGET_EXHAUSTED
   const execution = ImportRunRepository.startOrResume('长篇导入', '合成执行器').execution
   const slot = { runId: '长篇导入', stage: 'global' as const, batchId: 'done' }
   const { handle } = f.owner.begin({ ...stageSelection.global, uiActionNonce: '首次导入', modelId: model.id, selectedDraftIds: [], selectedFinalizedDraftIds: [], importSlot: slot, importExecution: { owner: execution.owner, epoch: execution.epoch } } as BeginGenerationRequest)
-  f.db.prepare('UPDATE generation_roots SET active_elapsed_ms=? WHERE root_action_id=?').run(rootBudget(f, handle.rootActionId).maxActiveElapsedMs - 200, handle.rootActionId)
+  f.db.prepare('UPDATE generation_roots SET active_elapsed_ms=? WHERE root_action_id=?').run(3_600_001, handle.rootActionId)
   const receipt = await f.owner.executeImportGeneration({ execution, handle, ordinal: 0, task: { purpose: 'import-global', output: 'structured-data', messages: [{ role: 'user', content: '推演参考小说' }] } })
-  expect(f.db.prepare('SELECT blocked_code FROM generation_roots WHERE root_action_id=?').pluck().get(handle.rootActionId)).toBe('ROOT_BUDGET_EXHAUSTED')
-  expect(receipt.outcome).toMatchObject({ status: 'incomplete', finishReason: 'error', receipt: { failureCode: 'ROOT_BUDGET_EXHAUSTED' } })
+  expect(f.db.prepare('SELECT blocked_code FROM generation_roots WHERE root_action_id=?').pluck().get(handle.rootActionId)).toBeNull()
+  expect(receipt.outcome).toMatchObject({ status: 'completed', finishReason: 'stop', receipt: { budget: { deadlineAt: 0 } } })
 }, 30_000)

@@ -1,3 +1,4 @@
+/** 使用隔离数据库和模型替身验证定稿后处理、显式恢复及已保存产物的幂等保护。 */
 import { createMainGenerationOwner } from '../../../../../electron/services/main-generation-owner'
 import { ModelExecutionLeaseRegistry } from '../../../../../electron/services/model-execution-lease'
 import { readMainGenerationPolicy } from '../../../../../electron/services/main-generation-plan'
@@ -962,7 +963,7 @@ it('#420 角色状态断流后，用户重试每次只发一次新请求，失�
  const initial = await run(false)
  expect(initial.steps).toMatchObject({ chapter_notes: { ok: true }, character_cards: { ok: false } })
  expect(characterCalls).toBe(1)
- expect(initial.steps.character_cards.error).toBe('FINALIZATION_GENERATION_ARTIFACT_REQUIRED')
+ expect(initial.steps.character_cards.error).toBe('FINALIZATION_GENERATION_INCOMPLETE')
  const failedAgain = await run(true)
  expect(failedAgain.steps.character_cards.ok).toBe(false)
  expect(failedAgain.steps.character_cards.error).toBe('FINALIZATION_GENERATION_INCOMPLETE')
@@ -1016,6 +1017,32 @@ it('#420 运行中取消后，界面的重试（retryInvalidResult）在新运�
  expect(characterCalls).toBe(2)
  expect(runs()).toBe(before + 1)
  expect(CharacterRepository.getById(characterId)?.currentState?.location).toBe('harbor')
+})
+
+it('章节要点断流后继续仅重发一次，保留原定稿和原生成运行', async () => {
+ insertFinalizedDraft(7, 2)
+ let notesCalls = 0
+ useLLMStore.setState({ defaultModelId: 'test-model', generateStream: vi.fn(async (messages, streamCallbacks) => {
+  const system = messages.find((message: { role: string; content: string }) => message.role === 'system')?.content ?? ''
+  if (system.includes('character records')) { streamCallbacks.onDone?.(modelFixtureResponse('{"updates":[]}'), undefined, 'stop'); return 'characters' }
+  if (++notesCalls === 1) { streamCallbacks.onError?.('synthetic stream interrupted'); return 'interrupted' }
+  streamCallbacks.onDone?.('The handoff is complete.', undefined, 'stop')
+  return 'notes'
+ }) })
+ const initial = await command('The brass key changes hands.', { onlyFailed: true, stopOnFailure: true })
+  .execute({ step: {}, context: workflowContext, callbacks: callbacks() }).catch(error => error)
+ expect(initial).toBeInstanceOf(Error)
+ expect(notesCalls).toBe(1)
+ const originalRuns = getProjectDb()!.prepare('SELECT run_id FROM generation_runs').all()
+ const repaired = await command('The brass key changes hands.', { onlyFailed: true, retryInvalidResult: true, stopOnFailure: true })
+  .execute({ step: {}, context: workflowContext, callbacks: callbacks() })
+ expect(repaired.steps.chapter_notes.ok).toBe(true)
+ expect(repaired.steps.character_cards.ok).toBe(true)
+ expect(notesCalls).toBe(2)
+ expect(getProjectDb()!.prepare('SELECT run_id FROM generation_runs').all()).toEqual(expect.arrayContaining(originalRuns))
+ await command('The brass key changes hands.', { onlyFailed: true, retryInvalidResult: true, stopOnFailure: true })
+  .execute({ step: {}, context: workflowContext, callbacks: callbacks() })
+ expect(notesCalls).toBe(2)
 })
 
 it('#420 章节要点断流后作者改了本章蓝图要点，重试在新开的运行里重新请求并成功', async () => {

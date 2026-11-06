@@ -662,15 +662,15 @@ it('有效角色候选写入失败时显式重试仍只提交同一 artifact', a
  expect(f.owner.commitFinalizationGeneration(f.commitRequest)).toMatchObject({ applied: 1 })
 })
 
-it('显式重试耗尽原 root 的时间预算后 begin 不得换根绕过', async () => {
- const f = await splitEvidenceRun(undefined, [joined(false), joined(false), joined(false)])
- f.db.prepare('UPDATE generation_roots SET active_elapsed_ms=? WHERE root_action_id=?').run(f.result.run.ledger!.policy.maxActiveElapsedMs, f.handle.rootActionId)
- await expect(f.owner.executeFinalizationGeneration({ handle: f.handle, retryOf: f.artifactOf(f.result) })).rejects.toThrow(/BUDGET|ELAPSED/)
+it('显式重试超过一小时仍沿用原 root 并可继续生成', async () => {
+ const f = await splitEvidenceRun(undefined, [joined(false), joined(false), joined(false), joined(true)])
+ f.db.prepare('UPDATE generation_roots SET active_elapsed_ms=? WHERE root_action_id=?').run(3_600_001, f.handle.rootActionId)
+ await f.owner.executeFinalizationGeneration({ handle: f.handle, retryOf: f.artifactOf(f.result) })
  const recovery = f.owner.beginFinalizationGeneration({ slot: f.slot, modelId: 'synthetic' })
  expect(recovery.view.handle).toEqual(f.handle)
- expect(recovery.view.ledger?.physicalRequests).toBe(3)
+ expect(recovery.view.ledger?.physicalRequests).toBe(4)
  expect(f.db.prepare('SELECT COUNT(*) FROM generation_roots').pluck().get()).toBe(1)
- expect(f.dispatch).toHaveBeenCalledTimes(3)
+ expect(f.dispatch).toHaveBeenCalledTimes(4)
 })
 
 it.each(['stale-target', 'forged-hash', 'discarded', 'source-changed', 'root-pending', 'blocked'] as const)('显式修正拒绝 %s 且不发新请求', async mode => {

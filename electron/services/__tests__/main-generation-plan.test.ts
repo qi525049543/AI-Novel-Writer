@@ -156,12 +156,12 @@ describe('main generation physical liability planning without provider calls', (
     }
   })
   it('keeps the temporary S05 policy finite and explicit', () => {
-    expect(MAIN_GENERATION_POLICY.budget).toEqual({ maxPhysicalRequests: 32, maxTokenLiability: 2097152, maxOutputPerRequest: 32768, maxActiveElapsedMs: 3600000 })
+    expect(MAIN_GENERATION_POLICY.budget).toEqual({ maxPhysicalRequests: 32, maxTokenLiability: 2097152, maxOutputPerRequest: 32768, maxActiveElapsedMs: 0 })
   })
   it('scales batch roots by chapter count without shrinking below the single-root policy', () => {
     expect(batchRootBudget(1)).toEqual(MAIN_GENERATION_POLICY.budget)
     expect(batchRootBudget(4)).toEqual(MAIN_GENERATION_POLICY.budget)
-    expect(batchRootBudget(5)).toEqual({ maxPhysicalRequests: 40, maxTokenLiability: 2_621_440, maxOutputPerRequest: 32768, maxActiveElapsedMs: 4_500_000 })
+    expect(batchRootBudget(5)).toEqual({ maxPhysicalRequests: 40, maxTokenLiability: 2_621_440, maxOutputPerRequest: 32768, maxActiveElapsedMs: 0 })
     expect(batchRootBudget(10).maxPhysicalRequests).toBe(80)
     for (const invalid of [0, -1, 1.5, Number.NaN]) expect(() => batchRootBudget(invalid)).toThrow('GENERATION_BATCH_INTENT_INVALID')
   })

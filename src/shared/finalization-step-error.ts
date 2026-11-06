@@ -7,6 +7,8 @@ type StepRetry = 'prompt' | 'described' | 'never' | { after: string }
 
 /** 定稿后处理步骤的错误码。步骤记录里存错误码本身，界面展示时再按当前界面语言换成作者可读说明。 */
 const FINALIZATION_STEP_ERRORS: { code: RegExp; zh: string; en: string; retry: StepRetry }[] = [
+  { code: /^FINALIZATION_GENERATION_SERVICE_UNAVAILABLE$/, retry: 'prompt',
+    zh: '模型接口暂时不可用（HTTP 503），未返回生成结果。', en: 'The model endpoint is temporarily unavailable (HTTP 503); no generation result was returned.' },
   { code: /^FINALIZATION_GENERATION_INCOMPLETE$/, retry: 'prompt',
     zh: '模型这次没有返回完整结果（连接中断或输出被截断）。', en: 'The model did not return a complete result (the connection dropped or the output was cut off).' },
   { code: /^FINALIZATION_GENERATION_(ARTIFACT_REQUIRED|OUTCOME_UNKNOWN)$/, retry: 'prompt',
@@ -69,13 +71,24 @@ export function finalizationStepErrorCode(message: string): string | undefined {
 }
 
 /** 步骤记录里的错误码换成作者可读说明；其他错误原样返回。 */
-export function describeFinalizationStepError(error: string, text: (zhCNText: string, enUSText: string) => string): string {
+export function describeFinalizationStepError(
+  error: string,
+  text: (zhCNText: string, enUSText: string) => string,
+  retryAction: 'retry' | 'continue-import' = 'retry',
+): string {
   const entry = entryOf(error)
   if (!entry) return error
   const prompt = entry.retry === 'prompt'
+  // 导入的恢复入口叫“继续导入”，不能指向只在单章后处理卡上存在的“重试”。
+  const zhAction = retryAction === 'continue-import'
+    ? '请在导入窗口点「继续导入」，重新生成未完成的步骤；已保存的正文会保留。'
+    : '请点「重试」重新生成这一步。'
+  const enAction = retryAction === 'continue-import'
+    ? ' Select Continue import in the import dialog to regenerate unfinished steps; saved manuscript text is kept.'
+    : ' Select Retry to generate this step again.'
   return text(
-    entry.zh + (prompt ? '请点「重试」重新生成这一步。' : ''),
-    entry.en + (prompt ? ' Select Retry to generate this step again.' : ''),
+    entry.zh + (prompt ? zhAction : ''),
+    entry.en + (prompt ? enAction : ''),
   )
 }
 

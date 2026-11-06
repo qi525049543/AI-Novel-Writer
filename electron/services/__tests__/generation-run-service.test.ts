@@ -207,17 +207,29 @@ it('a failed reservation transaction cannot leave an artifact without its ledger
     expect(f.repository.listCandidates()).toHaveLength(0);
 });
 
-it('times out an uncooperative provider and ignores its late success', async () => {
+it.each([0, 3_600_000])('等待超过一小时仍不自动中止，手动取消保留文本并忽略迟到结果：%s', async maxActiveElapsedMs => {
     vi.useFakeTimers();
     const f = fixture();
     let finish!: (value: { usage: typeof usage; finishReason: string }) => void;
-    const service = createGenerationRunService({ repository: f.repository, dispatch: async () => new Promise(resolve => { finish = resolve; }) });
-    const run = service.open(f.open);
+    let signal!: AbortSignal;
+    const service = createGenerationRunService({ repository: f.repository, dispatch: async (_request, options) => {
+        signal = options.signal; options.onVisible({ kind: 'delta', text: '已生成片段' });
+        return new Promise(resolve => { finish = resolve; });
+    } });
+    const run = service.open({ ...f.open, budget: { ...f.open.budget, maxActiveElapsedMs } });
     const operation = service.execute(f.request(run.runId));
-    f.setNow(11000);
-    await vi.advanceTimersByTimeAsync(10000);
+    let settled = false;
+    void operation.then(() => { settled = true; });
+    f.setNow(7_201_000);
+    await vi.advanceTimersByTimeAsync(7_200_000);
+    expect(settled).toBe(false);
+    expect(signal.aborted).toBe(false);
+    expect(f.repository.budget(run.rootActionId).blockedCode).toBeNull();
+    service.cancel(run.rootActionId);
     const result = await operation;
-    expect(result.failureCode).toBe('ROOT_BUDGET_EXHAUSTED');
+    expect(signal.aborted).toBe(true);
+    expect(result.failureCode).toBe('GENERATION_CANCELLED');
+    expect(result.artifact?.text).toBe('已生成片段');
     expect(result.attempt.status).toBe('unknown');
     finish({ usage, finishReason: 'stop' });
     await Promise.resolve();
@@ -294,4 +306,19 @@ it('never persists stop completion for a prefix whose terminal flush failed, inc
         expect(result.failureCode).toBe('GENERATION_STORAGE_FAILED');expect(service.readUnsavedTails()[0].text).toBe('unsaved terminal text');db.close();db=new Database(file);
         const reopened=new GenerationRunRepository(()=>db),receipt=reopened.receipt(result.attempt.attemptId);expect(receipt.result?.finishReason).toBe('error');expect(receipt.budget.blockedCode).toBe('GENERATION_STORAGE_FAILED');expect(receipt.artifact?.text).toBe('');
     } finally {if(db.open)db.close();fs.rmSync(root,{recursive:true,force:true})}
+});
+
+// 历史预算保持原字节，恢复后只解除按时间拒绝，不影响请求次数上限。
+it('旧预算超过历史时限后重新打开仍可预留并发送下一请求', async () => {
+    const f = fixture(), run = f.repository.open(f.open);
+    f.db.prepare('UPDATE generation_roots SET active_elapsed_ms=? WHERE root_action_id=?').run(7_200_000, run.rootActionId);
+    const repository = new GenerationRunRepository(() => f.db);
+    const dispatch = vi.fn(async () => ({ usage, finishReason: 'stop' }));
+    const service = createGenerationRunService({ repository, dispatch });
+    const result = await service.execute(f.request(run.runId));
+    expect(result.result?.finishReason).toBe('stop');
+    expect(result.budget.policy.maxActiveElapsedMs).toBe(10000);
+    expect(result.budget.activeElapsedMs).toBeGreaterThanOrEqual(7_200_000);
+    expect(result.budget.blockedCode).toBeNull();
+    expect(dispatch).toHaveBeenCalledTimes(1);
 });

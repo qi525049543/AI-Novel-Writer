@@ -50,7 +50,7 @@ export interface ExecuteGenerationRequest {
     /** 首稿提示经主进程复核确实带有生成前定稿对账注入块；恢复据此决定续写/压缩是否沿用对账结果。 */
     reconciliationInjected?: boolean;
 }
-/** 作者暂停、取消、重开或本次运行总时长用尽时中止请求的原因；调用记录据此记为已取消，而不是服务商失败。存储失败、流不合规与关闭作品的中止不带它。 */
+/** 作者暂停、取消或重开时中止请求的原因；调用记录据此记为已取消，而不是服务商失败。存储失败、流不合规与关闭作品的中止不带它。 */
 export const GENERATION_STOPPED = new DOMException('GENERATION_STOPPED', 'AbortError');
 export interface GenerationRunServiceDependencies {
     repository: GenerationRunRepository;
@@ -182,9 +182,7 @@ export function createGenerationRunService(deps: GenerationRunServiceDependencie
             controllers.set(attemptId, { controller, rootId: run.rootActionId, flush: () => { retainInterruptedAgentText(); flush(); },
                 suspend: () => { receipt = deps.repository.receipt(attemptId); suspended = true; controller.abort(); } });
             let timer: ReturnType<typeof setInterval> | undefined;
-            let deadline: ReturnType<typeof setTimeout> | undefined;
             let removeAbortListener = () => { };
-            let timedOut = false;
             try {
                 try {
                     deps.repository.markDispatched(attemptId);
@@ -199,14 +197,7 @@ export function createGenerationRunService(deps: GenerationRunServiceDependencie
                     throw error;
                 }
                 timer = setInterval(flush, 1000);
-                const remaining = Math.max(0, receipt.budget.policy.maxActiveElapsedMs - deps.repository.budget(run.rootActionId).activeElapsedMs);
-                deadline = setTimeout(() => { timedOut = true; try {
-                    deps.repository.block(run.rootActionId, 'ROOT_BUDGET_EXHAUSTED');
-                }
-                catch {
-                    storageFailed = true;
-                    failedRoots.add(run.rootActionId);
-                } controller.abort(GENERATION_STOPPED); }, remaining);
+                // 不设置自动截止计时器；手动取消仍通过信号与 Promise.race 立即收尾。
                 const cancelled = new Promise<never>((_resolve, reject) => { const abort = () => reject(new Error('GENERATION_CANCELLED')); controller.signal.addEventListener('abort', abort, { once: true }); removeAbortListener = () => controller.signal.removeEventListener('abort', abort); });
                 const provider = deps.dispatch(request.providerRequest, { signal: controller.signal, onDiagnostics: value => {
                         if (terminal || storageFailed || controller.signal.aborted) return;
@@ -286,7 +277,7 @@ export function createGenerationRunService(deps: GenerationRunServiceDependencie
                         let known = 'GENERATION_PROVIDER_FAILED';
                         if (error instanceof Error && isTerminalProviderFailure(error.message)) known = 'GENERATION_CONTEXT_LENGTH_EXCEEDED';
                         else if (network) known = 'NETWORK_ERROR';
-                        const failureCode = storageFailed ? 'GENERATION_STORAGE_FAILED' : timedOut ? 'ROOT_BUDGET_EXHAUSTED'
+                        const failureCode = storageFailed ? 'GENERATION_STORAGE_FAILED'
                             : streamFailed ? 'GENERATION_STREAM_INVALID' : controller.signal.aborted ? 'GENERATION_CANCELLED' : known;
                         receipt = deps.repository.settle(attemptId, null, null, failureCode, diagnostics);
                     }
@@ -302,8 +293,6 @@ export function createGenerationRunService(deps: GenerationRunServiceDependencie
                 terminal = true;
                 if (timer)
                     clearInterval(timer);
-                if (deadline)
-                    clearTimeout(deadline);
                 removeAbortListener();
                 controllers.delete(attemptId);
             }
@@ -311,7 +300,7 @@ export function createGenerationRunService(deps: GenerationRunServiceDependencie
                 return { ...receipt, unsavedTail: text.slice(durable.length), failureCode: 'GENERATION_STORAGE_FAILED' };
             const finalReceipt = deps.repository.receipt(attemptId);
             if (controller.signal.aborted)
-                return { ...finalReceipt, failureCode: finalReceipt.failureCode ?? (timedOut ? 'ROOT_BUDGET_EXHAUSTED' : 'GENERATION_CANCELLED') };
+                return { ...finalReceipt, failureCode: finalReceipt.failureCode ?? 'GENERATION_CANCELLED' };
             return finalReceipt;
         })();
         pending.set(key, operation);

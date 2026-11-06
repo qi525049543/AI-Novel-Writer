@@ -1,10 +1,17 @@
+/** 验证导入工作流的持久检查点、项目会话和显式恢复接线，隔离真实模型与作品。 */
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const ipcMocks = vi.hoisted(() => ({ invoke: vi.fn() }))
 const characterSyncMocks = vi.hoisted(() => ({ retry: vi.fn() }))
-const commandMocks = vi.hoisted(() => ({ blueprintContext: undefined as WorkflowContext | undefined }))
+const commandMocks = vi.hoisted(() => ({ blueprintContext: undefined as WorkflowContext | undefined, postprocess: vi.fn() }))
+vi.mock('../commands/finalize-chapter.command', () => ({
+  RunFinalizePostProcessCommand: class {
+    constructor(private readonly params: unknown) {}
+    execute() { return commandMocks.postprocess(this.params) }
+  },
+}))
 vi.mock('../../ipc-client', () => ({
   ipc: { invokeWithProjectSession: ipcMocks.invoke },
 }))
@@ -71,6 +78,47 @@ beforeEach(() => {
 afterEach(() => useProjectStore.setState({ currentProject: null }))
 
 describe('createImportWorkflow', () => {
+  it.each([
+    ['author-commit', false],
+    ['author-postprocess', true],
+  ] as const)('从 %s 启动时只在恢复入口允许重新生成失败结果', async (entryStage, retryInvalidResult) => {
+    const snapshot = run({
+      purpose: 'author-manuscript', stage: entryStage, status: 'failed',
+      effectNamespace: 'import:author-manuscript:import-run-1', authorityFingerprint: 'c'.repeat(64),
+    })
+    const active = { ...snapshot, stage: 'author-postprocess', status: 'running' }
+    commandMocks.postprocess.mockRejectedValue(new Error('后处理步骤失败：章节剧情要点 — FINALIZATION_GENERATION_ARTIFACT_REQUIRED'))
+    ipcMocks.invoke.mockImplementation(async (_session, channel: string, ...args: unknown[]) => {
+      if (channel === 'db:import-run-get') return active
+      if (channel === 'db:import-run-start-resume') return { success: true, start: {
+        run: active, execution: { owner: executionOwner, epoch: 1, expiresAt: Number.MAX_SAFE_INTEGER },
+      } }
+      if (channel === 'db:import-run-renew-execution') return { success: true,
+        execution: { owner: executionOwner, epoch: 1, expiresAt: Number.MAX_SAFE_INTEGER },
+      }
+      if (channel === 'db:import-run-effect-receipt-get') return {
+        state: 'committed', kind: 'author-finalized-batch',
+        effectReceipt: { drafts: [{ chapterNumber: 1, draftId: 1, finalizationId: 'final-1', contentHash: 'c'.repeat(64) }] },
+      }
+      if (channel === 'db:import-run-list-chapters') return args[1] === 0
+        ? [{ number: 1, title: '开始', content: '测试正文', contentFingerprint: 'c'.repeat(64), contentSize: 12 }] : []
+      if (channel === 'db:draft-get-meta') return { status: 'finalized' }
+      if (channel === 'db:import-run-fail') return { success: true, run: snapshot }
+      throw new Error(`Unexpected channel ${channel}`)
+    })
+    const workflow = createImportWorkflow({ projectPath: session.projectPath, projectSession: session,
+      run: snapshot, executionOwner, authorChapterNumbers: [1] })
+    await expect(workflow.steps[2].executor({} as never, context(), callbacks))
+      .rejects.toThrow('继续导入')
+    expect(commandMocks.postprocess).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      onlyFailed: true, retryInvalidResult,
+    }))
+    const failure = ipcMocks.invoke.mock.calls.find(call => call[1] === 'db:import-run-fail')?.[4]
+    expect(failure).toContain('第 1 章')
+    expect(failure).not.toContain('FINALIZATION_GENERATION_ARTIFACT_REQUIRED')
+    expect(ipcMocks.invoke.mock.calls.map(call => call[1])).not.toContain('db:import-run-complete-batch')
+  })
+
   it('loads sparse frozen chapter numbers from a resumed author run manifest', async () => {
     const snapshot = run({
       purpose: 'author-manuscript',

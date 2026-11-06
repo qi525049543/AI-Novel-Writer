@@ -807,7 +807,7 @@ describe('frozen planning roots', () => {
   it('freezes the complete architecture on premise, shares liability with synopsis, and restores its exact chapter policy', async () => {
     const fetch = syntheticStream(), f = planningFixture()
     const root = f.owner.begin(architectureSelection(f, fullIntent))
-    expect(root.ledger!.policy).toEqual({ maxPhysicalRequests: 40, maxTokenLiability: 10485760, maxOutputPerRequest: 65536, maxActiveElapsedMs: 4500000 })
+    expect(root.ledger!.policy).toEqual({ maxPhysicalRequests: 40, maxTokenLiability: 10485760, maxOutputPerRequest: 65536, maxActiveElapsedMs: 0 })
     const repository = new GenerationRunRepository(() => f.db)
     const policy = repository.get(root.handle.runId).binding.sourceManifest.policy
     expect(policy).toMatchObject({ version: 's07-capacity-v2', planning: { kind: 'architecture', intent: fullIntent, outlineProtocol: PLOT_OUTLINE_PROTOCOL }, budget: root.ledger!.policy })
@@ -985,6 +985,8 @@ describe('automatic short outline binding', () => {
     const run = f.owner.begin({ ...f.begin, materialDecision: decision })
     const failed = await f.owner.execute({ handle: run.handle, invocationNonce: 'outline', task: outlineTask })
     const failedAttemptId = failed.outcome.receipt.visibleArtifact!.attemptId
+    // 已运行超过两小时仍可恢复短细纲重试。
+    f.db.prepare('UPDATE generation_roots SET active_elapsed_ms=? WHERE root_action_id=?').run(7_200_001, run.handle.rootActionId)
     const before = f.db.prepare('SELECT * FROM generation_attempts WHERE attempt_id=?').get(failedAttemptId)
     const owner = f.reopen(), resumed = await owner.resume(run.handle)
     expect(owner.readContext(resumed.handle).draftShortOutline?.retry).toEqual({ kind: 'available', failedAttemptId })
@@ -1045,7 +1047,7 @@ describe('automatic short outline binding', () => {
     expect(f.owner.read(run.handle).ledger?.physicalRequests).toBe(2)
   })
   it.each(['unknown-usage', 'reserved', 'dispatch-marked', 'content_filter', 'unknown-finish', 'blocked', 'cancelled',
-    'time-exhausted', 'tokens-exhausted', 'requests-exhausted', 'source-changed', 'model-changed', 'task-changed', 'wrong-attempt',
+    'tokens-exhausted', 'requests-exhausted', 'source-changed', 'model-changed', 'task-changed', 'wrong-attempt',
     'chapter-draft', 'chapter-draft-continuation', 'chapter-draft-no-progress-recovery', 'chapter-draft-condense'] as const)(
     'rejects unsafe outline retry without a new attempt: %s', async state => {
       const dispatch = vi.fn<GenerationRunServiceDependencies['dispatch']>(async () => ({
@@ -1063,7 +1065,6 @@ describe('automatic short outline binding', () => {
         const attempt = repository.receipt(failedAttemptId).attempt
         f.db.prepare('UPDATE generation_attempts SET attempt_json=? WHERE attempt_id=?').run(JSON.stringify({ ...attempt, status: state }), failedAttemptId)
       }
-      if (state === 'time-exhausted') f.db.prepare('UPDATE generation_roots SET active_elapsed_ms=? WHERE root_action_id=?').run(MAIN_GENERATION_POLICY.budget.maxActiveElapsedMs, run.handle.rootActionId)
       if (state === 'tokens-exhausted' || state === 'requests-exhausted') f.db.prepare('UPDATE generation_roots SET budget_json=? WHERE root_action_id=?')
         .run(JSON.stringify({ ...MAIN_GENERATION_POLICY.budget, ...(state === 'tokens-exhausted' ? { maxTokenLiability: 12 } : { maxPhysicalRequests: 1 }) }), run.handle.rootActionId)
       if (state === 'source-changed') f.db.exec("UPDATE project_core SET global_guidance='作者改了约束'")
@@ -2910,7 +2911,7 @@ describe('main draft persistence and batch lineage', () => {
     const batch = f.owner.beginBatch({ mode: 'auto_finalize', range: { startChapter: 1, endChapter: 10 }, targetUnits: 20,
       uiActionNonce: 'ten-chapter-batch', modelId: f.model.id, authorInputs, promptKeys: f.begin.promptKeys, skillStages: [] })
     const budget = batchRootBudget(10)
-    expect(budget).toEqual({ maxPhysicalRequests: 80, maxTokenLiability: 5_242_880, maxOutputPerRequest: 32_768, maxActiveElapsedMs: 9_000_000 })
+    expect(budget).toEqual({ maxPhysicalRequests: 80, maxTokenLiability: 5_242_880, maxOutputPerRequest: 32_768, maxActiveElapsedMs: 0 })
     const generated = await generate(f, { ...f.begin, authorInputs, batchId: batch.batchId, parentRootActionId: batch.rootHandle.rootActionId })
     expect(generated.run.budget.maxAttempts).toBe(80)
     // 每章最低 4 次（对账、首稿、notes、cards）× 10 = 40；典型每章 6 次 = 60；新上限 80 全部可用。

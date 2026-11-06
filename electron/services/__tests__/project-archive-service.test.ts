@@ -170,7 +170,7 @@ function seedProject(f: Fixture, secret = 'token-绝不外带'): { body: string;
       frozenInputHash: hash('input'), rootActionId: 'root-1', status: 'active' }
     db.prepare('INSERT INTO generation_roots(root_action_id,idempotency_key,action_json,budget_json) VALUES(?,?,?,?)')
       .run('root-1', 'root-key-1', JSON.stringify({ ...action, secretRef: secret }), JSON.stringify({
-        maxPhysicalRequests: 2, maxTokenLiability: 1000, maxOutputPerRequest: 500, maxActiveElapsedMs: 1000,
+        maxPhysicalRequests: 2, maxTokenLiability: 1000, maxOutputPerRequest: 500, maxActiveElapsedMs: 0,
       }))
     db.prepare('INSERT INTO generation_runs VALUES(?,?,?,?,?,?)').run(
       'run-1', 'root-1', JSON.stringify({ projectId: f.projectId, epoch: 'epoch-1', fingerprint: {},

@@ -1,3 +1,4 @@
+/** 验证定稿错误的双语说明和恢复入口，避免内部错误码或不可用的操作提示进入界面。 */
 import { describe, expect, it } from 'vitest'
 import { describeFinalizationStepError, finalizationStepErrorCode, planFinalizationRetry } from '../finalization-step-error'
 
@@ -5,6 +6,16 @@ const zh = (zhCNText: string) => zhCNText
 const en = (_zhCNText: string, enUSText: string) => enUSText
 
 describe('定稿后处理步骤错误', () => {
+  it('导入后处理的恢复提示指向继续导入，并说明已保存正文会保留', () => {
+    expect(describeFinalizationStepError('FINALIZATION_GENERATION_INCOMPLETE', zh, 'continue-import'))
+      .toContain('请在导入窗口点「继续导入」')
+    expect(describeFinalizationStepError('FINALIZATION_GENERATION_ARTIFACT_REQUIRED', en, 'continue-import'))
+      .toContain('Continue import')
+    expect(describeFinalizationStepError('FINALIZATION_GENERATION_ARTIFACT_REQUIRED', en, 'continue-import'))
+      .not.toContain('Select Retry')
+    expect(describeFinalizationStepError('ROOT_BUDGET_EXHAUSTED', zh, 'continue-import'))
+      .not.toContain('请在导入窗口')
+  })
   it('去掉 IPC 包装后只认本流程的错误码', () => {
     expect(finalizationStepErrorCode("Error invoking remote method 'project-session:invoke': Error: ROOT_BUDGET_EXHAUSTED")).toBe('ROOT_BUDGET_EXHAUSTED')
     expect(finalizationStepErrorCode('FINALIZATION_GENERATION_INCOMPLETE')).toBe('FINALIZATION_GENERATION_INCOMPLETE')
@@ -150,3 +161,15 @@ describe('定稿后处理步骤错误', () => {
   })
 })
 
+
+it('503 错误保留服务商状态并指向导入恢复入口，不误报没有发请求', () => {
+ const code = 'FINALIZATION_GENERATION_SERVICE_UNAVAILABLE'
+ expect(finalizationStepErrorCode(code)).toBe(code)
+ for (const locale of [zh, en]) {
+  const message = describeFinalizationStepError(code, locale, 'continue-import')
+  expect(message).toContain('HTTP 503')
+  expect(message).not.toMatch(/没有发出|no new model request/)
+ }
+ expect(describeFinalizationStepError(code, zh, 'continue-import')).toContain('继续导入')
+ expect(describeFinalizationStepError(code, en, 'continue-import')).toContain('Continue import')
+})

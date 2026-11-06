@@ -1,3 +1,4 @@
+/** 验证导入字节读取期间的项目切换、持久进度与失败恢复，使用隔离项目数据。 */
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -167,8 +168,8 @@ describe('current-project import parsing persistence', () => {
     const source = path.join(parent, 'single.txt')
     fs.writeFileSync(source, 'x', 'utf8')
     mocks.showOpenDialog.mockResolvedValue({ canceled: false, filePaths: [source] })
-    const read = deferred<string>()
-    const fileSystem = { readText: vi.fn(() => read.promise) } as unknown as WindowsSafeFileSystem
+    const read = deferred<Buffer>()
+    const fileSystem = { readBytes: vi.fn(() => read.promise) } as unknown as WindowsSafeFileSystem
     registerImportController(
       fileSystem,
       filePath => ({ canonicalLocation: filePath, fileIdentity: `file:${path.basename(filePath)}` }),
@@ -182,10 +183,10 @@ describe('current-project import parsing persistence', () => {
       { runId: 'single-read-switch', purpose: 'reference', locale: 'en-US', expectedProjectPath: projectRoot },
       session,
     )
-    await vi.waitFor(() => expect(fileSystem.readText).toHaveBeenCalledOnce())
+    await vi.waitFor(() => expect(fileSystem.readBytes).toHaveBeenCalledOnce())
 
     openNewProject('other-single-project')
-    read.resolve('Chapter 1 Single\nalpha')
+    read.resolve(Buffer.from('Chapter 1 Single\nalpha'))
 
     await expect(pending).resolves.toMatchObject({ success: false })
     expect(importRows()).toEqual({ runs: [], sources: [] })
@@ -202,11 +203,11 @@ describe('current-project import parsing persistence', () => {
     fs.writeFileSync(sourceA, 'a', 'utf8')
     fs.writeFileSync(sourceB, 'b', 'utf8')
     mocks.showOpenDialog.mockResolvedValue({ canceled: false, filePaths: [sourceA, sourceB] })
-    const secondRead = deferred<string>()
+    const secondRead = deferred<Buffer>()
     const fileSystem = {
-      readText: vi.fn(async (capability: { relativePath: string }) => (
+      readBytes: vi.fn(async (capability: { relativePath: string }) => (
         capability.relativePath.endsWith('multi-a.txt')
-          ? 'Chapter 1 A\nalpha'
+          ? Buffer.from('Chapter 1 A\nalpha')
           : secondRead.promise
       )),
     } as unknown as WindowsSafeFileSystem
@@ -223,10 +224,10 @@ describe('current-project import parsing persistence', () => {
       { runId: 'multi-read-switch', purpose: 'reference', locale: 'en-US', expectedProjectPath: projectRoot },
       session,
     )
-    await vi.waitFor(() => expect(fileSystem.readText).toHaveBeenCalledTimes(2))
+    await vi.waitFor(() => expect(fileSystem.readBytes).toHaveBeenCalledTimes(2))
 
     openNewProject('other-multi-project')
-    secondRead.resolve('Chapter 2 B\nbeta')
+    secondRead.resolve(Buffer.from('Chapter 2 B\nbeta'))
 
     await expect(pending).resolves.toMatchObject({ success: false })
     expect(importRows()).toEqual({ runs: [], sources: [] })
@@ -250,12 +251,12 @@ describe('current-project import parsing persistence', () => {
     const reads: string[] = []
     let failB = true
     const fileSystem = {
-      readText: vi.fn(async (capability: { rootPath: string; relativePath: string }) => {
+      readBytes: vi.fn(async (capability: { rootPath: string; relativePath: string }) => {
         const run = getProjectDb()!.prepare(`SELECT stage FROM import_runs WHERE id = 'parse-before-read'`).get()
         expect(run).toEqual({ stage: 'parsing' })
         reads.push(path.join(capability.rootPath, capability.relativePath))
         if (capability.relativePath.endsWith('b.txt') && failB) throw new Error('simulated read crash')
-        return fs.readFileSync(path.join(capability.rootPath, capability.relativePath), 'utf8')
+        return fs.readFileSync(path.join(capability.rootPath, capability.relativePath))
       }),
     } as unknown as WindowsSafeFileSystem
     registerImportController(
@@ -306,7 +307,7 @@ describe('current-project import parsing persistence', () => {
     mocks.showOpenDialog.mockResolvedValue({ canceled: false, filePaths: [source] })
     const privateDiagnostic = `ENOENT: no such file or directory, open '${source}'`
     const fileSystem = {
-      readText: vi.fn(async () => { throw new Error(privateDiagnostic) }),
+      readBytes: vi.fn(async () => { throw new Error(privateDiagnostic) }),
     } as unknown as WindowsSafeFileSystem
     registerImportController(
       fileSystem,
@@ -346,7 +347,7 @@ describe('current-project import parsing persistence', () => {
     mocks.showOpenDialog.mockResolvedValue({ canceled: false, filePaths: [source] })
     let content = '   \r\n'
     const fileSystem = {
-      readText: vi.fn(async () => content),
+      readBytes: vi.fn(async () => Buffer.from(content)),
     } as unknown as WindowsSafeFileSystem
     registerImportController(
       fileSystem,
@@ -389,11 +390,11 @@ describe('current-project import parsing persistence', () => {
     let blankContent = ' \n\t'
     const reads: string[] = []
     const fileSystem = {
-      readText: vi.fn(async (capability: { relativePath: string }) => {
+      readBytes: vi.fn(async (capability: { relativePath: string }) => {
         reads.push(capability.relativePath)
-        return capability.relativePath === 'a-valid.txt'
+        return Buffer.from(capability.relativePath === 'a-valid.txt'
           ? '第1章 有效来源\n已保存的正文'
-          : blankContent
+          : blankContent)
       }),
     } as unknown as WindowsSafeFileSystem
     registerImportController(
@@ -445,9 +446,9 @@ describe('current-project import parsing persistence', () => {
     })
     const reads: string[] = []
     const fileSystem = {
-      readText: vi.fn(async (capability: { rootPath: string; relativePath: string }) => {
+      readBytes: vi.fn(async (capability: { rootPath: string; relativePath: string }) => {
         reads.push(capability.relativePath)
-        return fs.readFileSync(path.join(capability.rootPath, capability.relativePath), 'utf8')
+        return fs.readFileSync(path.join(capability.rootPath, capability.relativePath))
       }),
     } as unknown as WindowsSafeFileSystem
     registerImportController(
@@ -532,10 +533,10 @@ describe('current-project import parsing persistence', () => {
       .mockResolvedValueOnce({ canceled: false, filePaths: [validSource, blankSource] })
       .mockResolvedValueOnce({ canceled: false, filePaths: [injectedSource] })
     const fileSystem = {
-      readText: vi.fn(async (capability: { relativePath: string }) => (
+      readBytes: vi.fn(async (capability: { relativePath: string }) => (
         capability.relativePath === 'resume-valid.txt'
-          ? '第1章 已保存\n已保存正文'
-          : ' \n\t'
+          ? Buffer.from('第1章 已保存\n已保存正文')
+          : Buffer.from(' \n\t')
       )),
     } as unknown as WindowsSafeFileSystem
     registerImportController(
@@ -569,10 +570,10 @@ describe('current-project import parsing persistence', () => {
     mocks.showOpenDialog
       .mockResolvedValueOnce({ canceled: false, filePaths: [sourceA, sourceB] })
       .mockResolvedValueOnce({ canceled: false, filePaths: [sourceB] })
-    const readText = vi.fn(async (capability: { rootPath: string; relativePath: string }) => (
-      fs.readFileSync(path.join(capability.rootPath, capability.relativePath), 'utf8')
+    const readBytes = vi.fn(async (capability: { rootPath: string; relativePath: string }) => (
+      fs.readFileSync(path.join(capability.rootPath, capability.relativePath))
     ))
-    const fileSystem = { readText } as unknown as WindowsSafeFileSystem
+    const fileSystem = { readBytes } as unknown as WindowsSafeFileSystem
     registerImportController(
       fileSystem,
       filePath => ({ canonicalLocation: filePath, fileIdentity: `file:${path.basename(filePath)}` }),
@@ -589,11 +590,11 @@ describe('current-project import parsing persistence', () => {
 
     await expect(handler(event, request, session)).resolves.toMatchObject({ success: false })
     const before = getProjectDb()!.serialize()
-    const readCount = readText.mock.calls.length
+    const readCount = readBytes.mock.calls.length
     fs.writeFileSync(sourceB, '12345678901234567890123456789012345', 'utf8')
 
     await expect(handler(event, request, session)).resolves.toMatchObject({ success: false })
-    expect(readText).toHaveBeenCalledTimes(readCount)
+    expect(readBytes).toHaveBeenCalledTimes(readCount)
     expect(getProjectDb()!.serialize().equals(before)).toBe(true)
   })
 })

@@ -1,3 +1,4 @@
+/** 负责小说文件授权读取、编码解码与章节预览；仅确认导入后由后续流程提交项目内容。 */
 import { app, ipcMain } from 'electron'
 import { showOpenDialogInLastDirectory } from '../utils/remembered-dialog'
 import path from 'node:path'
@@ -33,6 +34,7 @@ import type {
 } from '../../src/shared/import-run'
 import type { ProjectSessionContext } from '../../src/shared/ipc-channels'
 import { countDraftUnits } from '../../src/shared/draft-units'
+import { decodeImportText } from '../services/import-text-decoder'
 import { getCurrentProjectPath, getProjectDb } from '../database'
 import { projectAccess } from '../services/project-access'
 import { assertRequiredExpectedProjectPath } from '../utils/project-context'
@@ -124,6 +126,13 @@ function importSelectionErrorMessage(
       locale,
       '该 EPUB 受 DRM 或加密保护，无法导入。请使用无 DRM 的 EPUB 或文本文件。',
       'This EPUB is DRM-protected or encrypted and cannot be imported. Use a DRM-free EPUB or text file.',
+    )
+  }
+  if (code === 'IMPORT_TEXT_ENCODING_UNSUPPORTED') {
+    return importText(
+      locale,
+      '无法识别文件的文本编码，或文件包含非文本内容。请将原稿另存为 UTF-8 文本后重新选择。',
+      'The file encoding is not supported, or the file contains non-text data. Save the manuscript as UTF-8 text and choose it again.',
     )
   }
   if (code === 'EPUB_EXPANSION_LIMIT') {
@@ -513,8 +522,10 @@ export function registerImportController(
               }]
             })
           } else {
-            content = await fileSystem.readText(capability, remainingBytes)
+            // 外部小说兼容常用中文编码；授权读取原始字节后再解码，转换后的 UTF-8 仍受总大小限制。
+            const bytes = await fileSystem.readBytes(capability, remainingBytes)
             assertFrozenProject()
+            content = decodeImportText(bytes)
             contentBytes = reserveSourceBytes(content)
             content = content.trim()
             if (!content) {

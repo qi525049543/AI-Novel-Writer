@@ -1,3 +1,4 @@
+/** 验证小说选取、编码解码、资源限额及外部文件授权边界，确保预览不泄露原文或路径。 */
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -60,7 +61,7 @@ function event() {
 
 function boundedReader(contents: Record<string, string>) {
   const decodedFiles: string[] = []
-  const readText = vi.fn(async (
+  const readBytes = vi.fn(async (
     capability: { relativePath: string },
     maxBytes = Number.POSITIVE_INFINITY,
   ) => {
@@ -69,16 +70,16 @@ function boundedReader(contents: Record<string, string>) {
       throw new Error('SECURE_FS_FILE_TOO_LARGE')
     }
     decodedFiles.push(capability.relativePath)
-    return content
+    return Buffer.from(content, 'utf8')
   })
   const fileSystem = {
-    readText,
+    readBytes,
     writeTextAtomically: vi.fn(),
     mkdir: vi.fn(),
     exists: vi.fn(),
     listDirectory: vi.fn(),
   } as unknown as WindowsSafeFileSystem
-  return { fileSystem, readText, decodedFiles }
+  return { fileSystem, readBytes, decodedFiles }
 }
 
 describe('novel import external-file capability', () => {
@@ -117,6 +118,52 @@ describe('novel import external-file capability', () => {
     expect(JSON.stringify(result)).not.toContain('fileIdentity')
     expect(grants.activeCount()).toBe(0)
     expect(inspections.activeCount()).toBe(1)
+  })
+
+  it.each(['reference', 'author-manuscript'] as const)('imports GBK chapters for %s', async purpose => {
+    const selected = path.join(temporaryRoot, `gbk-${purpose}.txt`)
+    fs.writeFileSync(selected, Buffer.from('b5da31d5c220bfaacabc0ad5fdcec4', 'hex'))
+    mocks.showOpenDialog.mockResolvedValue({ canceled: false, filePaths: [selected] })
+
+    const result = await handler('dialog:select-novel-files')(event(), purpose)
+    expect(result).toMatchObject({
+      success: true,
+      inspection: { purpose, chapterCount: 1, preview: [{ number: 1, title: '开始' }] },
+    })
+    const inspectionId = (result as { inspection: { inspectionId: string } }).inspection.inspectionId
+    expect(inspections.peek(inspectionId, 29).chapters[0].content).toBe('正文')
+    expect(grants.activeCount()).toBe(0)
+  })
+
+  it('reports unsupported text encoding without retaining an inspection', async () => {
+    const selected = path.join(temporaryRoot, 'invalid-encoding.txt')
+    fs.writeFileSync(selected, Buffer.from([0x81]))
+    mocks.showOpenDialog.mockResolvedValue({ canceled: false, filePaths: [selected] })
+
+    await expect(handler('dialog:select-novel-files')(event(), 'author-manuscript')).resolves.toEqual({
+      success: false,
+      error: '无法识别文件的文本编码，或文件包含非文本内容。请将原稿另存为 UTF-8 文本后重新选择。',
+    })
+    expect(inspections.activeCount()).toBe(0)
+    expect(grants.activeCount()).toBe(0)
+  })
+
+  it('enforces the UTF-8 size limit after decoding a smaller GBK source', async () => {
+    const selected = path.join(temporaryRoot, 'expanded-gbk.txt')
+    const bytes = Buffer.from('b5da31d5c220bfaacabc0ad5fdcec4', 'hex')
+    fs.writeFileSync(selected, bytes)
+    mocks.handlers.clear()
+    register(nodeTestSecureFileSystem, filePath => ({ canonicalLocation: filePath }), {
+      maxTotalBytes: bytes.length,
+    })
+    mocks.showOpenDialog.mockResolvedValue({ canceled: false, filePaths: [selected] })
+
+    await expect(handler('dialog:select-novel-files')(event(), 'author-manuscript')).resolves.toMatchObject({
+      success: false,
+      error: expect.stringContaining('所选文件总大小超过导入上限'),
+    })
+    expect(inspections.activeCount()).toBe(0)
+    expect(grants.activeCount()).toBe(0)
   })
 
   it('reads EPUB bytes and splits multiple chapter headings inside one spine document', async () => {
@@ -224,7 +271,7 @@ describe('novel import external-file capability', () => {
     const secondContent = '第1章 重复\n第二份正文'
     fs.writeFileSync(first, firstContent, 'utf8')
     fs.writeFileSync(second, secondContent, 'utf8')
-    const { fileSystem, readText } = boundedReader({
+    const { fileSystem, readBytes } = boundedReader({
       'author-a.txt': firstContent,
       'author-b.txt': secondContent,
     })
@@ -236,7 +283,7 @@ describe('novel import external-file capability', () => {
       success: false,
       error: expect.stringMatching(/重复的第 1 章/),
     })
-    expect(readText).toHaveBeenCalledTimes(2)
+    expect(readBytes).toHaveBeenCalledTimes(2)
     expect(inspections.activeCount()).toBe(0)
     expect(grants.activeCount()).toBe(0)
   })
@@ -269,10 +316,10 @@ describe('novel import external-file capability', () => {
     mocks.handlers.clear()
     const swappingFileSystem = {
       ...nodeTestSecureFileSystem,
-      readText: vi.fn(async (capability, maxBytes) => {
+      readBytes: vi.fn(async (capability, maxBytes) => {
         fs.rmSync(guardedDirectory, { recursive: true, force: true })
         fs.symlinkSync(outsideDirectory, guardedDirectory, 'junction')
-        return nodeTestSecureFileSystem.readText(capability, maxBytes)
+        return nodeTestSecureFileSystem.readBytes(capability, maxBytes)
       }),
     } as WindowsSafeFileSystem
     register(swappingFileSystem, filePath => ({ canonicalLocation: fs.realpathSync.native(filePath) }))
@@ -289,7 +336,7 @@ describe('novel import external-file capability', () => {
       fs.writeFileSync(filePath, '1234', 'utf8')
       return filePath
     })
-    const { fileSystem, readText } = boundedReader({})
+    const { fileSystem, readBytes } = boundedReader({})
     mocks.handlers.clear()
     register(fileSystem, filePath => ({ canonicalLocation: filePath }), {
       maxSourceFiles: 5_000,
@@ -304,7 +351,7 @@ describe('novel import external-file capability', () => {
       success: false,
       error: '所选文件总大小超过导入上限（最多 10 字节）。',
     })
-    expect(readText).not.toHaveBeenCalled()
+    expect(readBytes).not.toHaveBeenCalled()
     expect(grants.activeCount()).toBe(0)
   })
 
@@ -314,7 +361,7 @@ describe('novel import external-file capability', () => {
       fs.writeFileSync(filePath, 'x', 'utf8')
       return filePath
     })
-    const { fileSystem, readText, decodedFiles } = boundedReader({
+    const { fileSystem, readBytes, decodedFiles } = boundedReader({
       'growth-a.txt': '1234',
       'growth-b.txt': '1234',
       'growth-c.txt': '1234',
@@ -333,7 +380,7 @@ describe('novel import external-file capability', () => {
       success: false,
       error: '所选文件总大小超过导入上限（最多 10 字节）。',
     })
-    expect(readText.mock.calls.map(([capability, maxBytes]) => ({
+    expect(readBytes.mock.calls.map(([capability, maxBytes]) => ({
       relativePath: capability.relativePath,
       maxBytes,
     }))).toEqual([
@@ -349,7 +396,7 @@ describe('novel import external-file capability', () => {
   it('rejects 5001 source grants before reading any file', async () => {
     const selected = path.join(temporaryRoot, 'too-many-files.txt')
     fs.writeFileSync(selected, 'x', 'utf8')
-    const { fileSystem, readText } = boundedReader({ 'too-many-files.txt': 'x' })
+    const { fileSystem, readBytes } = boundedReader({ 'too-many-files.txt': 'x' })
     mocks.handlers.clear()
     register(fileSystem, filePath => ({ canonicalLocation: filePath }))
     mocks.showOpenDialog.mockResolvedValue({
@@ -363,7 +410,7 @@ describe('novel import external-file capability', () => {
       success: false,
       error: '所选文件数量超过导入上限（最多 5000 个）。',
     })
-    expect(readText).not.toHaveBeenCalled()
+    expect(readBytes).not.toHaveBeenCalled()
     expect(grants.activeCount()).toBe(0)
   })
 
@@ -377,7 +424,7 @@ describe('novel import external-file capability', () => {
       { length: 5_001 },
       (_, index) => `第${index + 1}章 标题\n正文`,
     ).join('\n')
-    const { fileSystem, readText } = boundedReader({
+    const { fileSystem, readBytes } = boundedReader({
       'chapters-a.txt': oversizedChapterFile,
       'chapters-b.txt': '第1章 后续\n不应读取',
     })
@@ -391,8 +438,8 @@ describe('novel import external-file capability', () => {
       success: false,
       error: '拆分后的章节数超过导入上限（最多 5000 章）。',
     })
-    expect(readText).toHaveBeenCalledTimes(1)
-    expect(readText.mock.calls[0][0].relativePath).toBe('chapters-a.txt')
+    expect(readBytes).toHaveBeenCalledTimes(1)
+    expect(readBytes.mock.calls[0][0].relativePath).toBe('chapters-a.txt')
     expect(grants.activeCount()).toBe(0)
   })
 })

@@ -126,3 +126,43 @@ it('回放已有的正常结束但不可用的候选：同样报结果不可用�
  await expect(runFinalizationGeneration(setup(invoke))).rejects.toThrow('FINALIZATION_GENERATION_RESULT_UNUSABLE')
  expect(invoke.mock.calls.map(([channel]) => channel)).toEqual(['finalization-generation:read', 'finalization-generation:begin'])
 })
+
+// 复现先收到 503、随后内部重试只读历史的流程；只有显式恢复才能再发一次请求。
+it.each(['chapter_notes', 'character_cards'] as const)('%s 的 HTTP 503 原因跨回放保留，显式恢复成功后只提交新候选', async stepKey => {
+ const selectedSlot = { ...slot, stepKey }
+ const failed = { ...candidate, attemptId: '失败尝试', status: 'unknown', compositionEligible: false,
+  diagnostics: { httpStatus: 503 } }
+ const fixed = { ...candidate, attemptId: '恢复尝试', artifactId: '恢复候选' }
+ let executed = 0
+ const invoke = vi.fn(async (channel: string, request: { recoverFrom?: string }) => {
+  if (channel === 'finalization-generation:read' || channel === 'finalization-generation:begin') {
+   return { ...stored, context: { slot: selectedSlot }, attemptCount: executed ? 1 : 0,
+    view: { ...view, artifacts: executed ? [failed] : [] },
+    ...(executed ? { latestAttempt: { attemptId: failed.attemptId, inFlight: false, finishReason: null, failureCode: 'GENERATION_PROVIDER_FAILED' } } : {}) }
+  }
+  if (channel === 'finalization-generation:execute') {
+   executed++
+   if (executed === 1) return { run: { ...view, artifacts: [failed] }, outcome: { status: 'incomplete', finishReason: 'error',
+    receipt: { failureCode: 'GENERATION_PROVIDER_FAILED', diagnostics: { httpStatus: 503 } } } }
+   expect(request.recoverFrom).toBe(failed.attemptId)
+   return { run: { ...view, artifacts: [failed, fixed] }, outcome: { status: 'completed', finishReason: 'stop',
+    receipt: { visibleArtifact: { artifactId: fixed.artifactId, revision: fixed.revision, textHash: fixed.textHash } } } }
+  }
+  expect(channel).toBe('finalization-generation:commit')
+  expect(request).toEqual({ handle, artifact: { artifactId: fixed.artifactId, revision: fixed.revision, textHash: fixed.textHash } })
+  return { ...effect, stepKey }
+ })
+ const options = { ...setup(invoke), slot: selectedSlot }
+ await expect(runFinalizationGeneration(options)).rejects.toThrow('FINALIZATION_GENERATION_SERVICE_UNAVAILABLE')
+ await expect(runFinalizationGeneration(options)).rejects.toThrow('FINALIZATION_GENERATION_SERVICE_UNAVAILABLE')
+ expect(executed).toBe(1)
+ await expect(runFinalizationGeneration({ ...options, recoverFrom: failed.attemptId })).resolves.toMatchObject({ success: true })
+ expect(executed).toBe(2)
+})
+it('回放时不把同根另一步骤的 503 误当成本步骤的诊断', async () => {
+ const invoke = vi.fn(async () => ({ ...stored,
+  latestAttempt: { attemptId: '当前尝试', inFlight: false, finishReason: null, failureCode: 'NETWORK_ERROR' },
+  view: { ...view, artifacts: [{ ...candidate, attemptId: '其他步骤', status: 'unknown', compositionEligible: false, diagnostics: { httpStatus: 503 } }] } }))
+ await expect(runFinalizationGeneration(setup(invoke))).rejects.toThrow('FINALIZATION_GENERATION_INCOMPLETE')
+ expect(invoke).toHaveBeenCalledTimes(2)
+})

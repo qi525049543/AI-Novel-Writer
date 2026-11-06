@@ -17,8 +17,9 @@ export const MAIN_GENERATION_POLICY = Object.freeze({
   version: 's07-task-and-liability-v1',
   taskBudgetPolicy: S07_TASK_BUDGET_POLICY,
   capabilityPolicyVersion: 'verified-endpoint-model-budget-v1',
+  // 活动时长为 0 表示不设自动截止时间；请求数和单次输出上限继续生效。
   budget: Object.freeze({ maxPhysicalRequests: 32, maxTokenLiability: 2_097_152,
-    maxOutputPerRequest: 32_768, maxActiveElapsedMs: 3_600_000 } satisfies RootBudget),
+    maxOutputPerRequest: 32_768, maxActiveElapsedMs: 0 } satisfies RootBudget),
   estimatorVersion: 'utf8-bytes-plus-chat-framing-v1',
   safetyMarginTokens: 512,
 })
@@ -35,8 +36,8 @@ function scaledRootBudget(requests: number, maxOutputPerRequest: number, perRequ
   const budget = { maxPhysicalRequests,
     maxTokenLiability: perRequestLiability * maxPhysicalRequests,
     maxOutputPerRequest,
-    maxActiveElapsedMs: base.maxActiveElapsedMs / base.maxPhysicalRequests * maxPhysicalRequests }
-  if (Object.values(budget).some(value => !Number.isSafeInteger(value) || value <= 0)) throw new Error('GENERATION_PLANNING_BUDGET_INVALID')
+    maxActiveElapsedMs: 0 }
+  if (Object.entries(budget).some(([key, value]) => !Number.isSafeInteger(value) || (key === 'maxActiveElapsedMs' ? value < 0 : value <= 0))) throw new Error('GENERATION_PLANNING_BUDGET_INVALID')
   return Object.freeze(budget)
 }
 
@@ -143,7 +144,8 @@ export function readMainGenerationPolicy(value: unknown): MainGenerationPolicy {
   if (!['s07-planning-v1', 's07-capacity-v2', MAIN_GENERATION_POLICY.version].includes(String(record.version))) throw new Error('GENERATION_POLICY_UNSUPPORTED')
   const budget = planningRecord(record.budget), scope = record.planning === undefined ? null : planningRecord(record.planning)
   if (!isDeepStrictEqual(Object.keys(budget).sort(), Object.keys(MAIN_GENERATION_POLICY.budget).sort())
-    || Object.values(budget).some(number => typeof number !== 'number' || !Number.isSafeInteger(number) || number <= 0))
+    || Object.entries(budget).some(([key, number]) => typeof number !== 'number' || !Number.isSafeInteger(number)
+      || (key === 'maxActiveElapsedMs' ? number < 0 : number <= 0)))
     throw new Error('GENERATION_PLANNING_BUDGET_INVALID')
   let planning: PlanningGenerationScope | undefined
   if (!scope) {
@@ -170,8 +172,8 @@ export function readMainGenerationPolicy(value: unknown): MainGenerationPolicy {
  *
  * 每章预算 8 次 = 最低 4 次（细纲、首稿、notes、cards）+ 4 次余量，足够覆盖典型的一次压缩或续写
  * 加两次角色卡修复；余量在整批内共享。单章理论上限（细纲 1 + 首稿 1 + 续写/无进展恢复 7 + 压缩 1
- * + notes 1 + cards 3 = 14 次）不按章预留：超出仍 fail-closed。token 责任上限与活动时长按每次
- * 请求的同一比例（65 536 tokens、112.5 秒）缩放，使批量每次请求可用的额度与单根一致；单章非批量根不变。
+ * + notes 1 + cards 3 = 14 次）不按章预留：超出仍 fail-closed。token 责任额度按每次
+ * 请求的同一比例（65 536 tokens）缩放，仅用于记账；活动时长不设上限，作者可手动取消。
  */
 export const BATCH_ROOT_PHYSICAL_REQUESTS_PER_CHAPTER = 8
 export function batchRootBudget(chapterCount: number): RootBudget {

@@ -56,6 +56,8 @@ The library lists every book you have written. Select a cover to preview it: the
 
 "Novel breakdown & imitation" in the library imports a novel as a .txt, .md, or .epub file, splits it into chapters, and asks what the text is for.
 
+TXT and Markdown novels support UTF-8, GBK/GB18030, and UTF-16 with a BOM. Importing leaves the source file unchanged. If the encoding is not recognized, save a copy as UTF-8 and select it again.
+
 - **Breakdown and imitation**: choose "Reference novel". AI breaks down its structure, extracts its style, infers chapter blueprints, and produces imitation constraints for your later writing. A reference novel goes only into the knowledge base and the breakdown; it never mixes into your prose.
 - **Continue your manuscript**: choose "My manuscript". The chapters you already wrote are imported by chapter number as finalized text, and AI continues the following chapters from those characters and events.
 - **Continue a passage**: select text in the prose editor and choose Continue on the toolbar; AI writes on from that passage.
@@ -91,7 +93,7 @@ In the prose editor, Tab inserts two full-width spaces as a paragraph indent. A 
 
 ### Run sheet: see what AI is doing
 
-Every generation run appears in the run sheet, with In progress, History, and Diagnostics tabs. You can watch the output as it is written and cancel at any time. A batch can be paused. If a run fails, the text written so far is kept as a recovery candidate that you can copy or discard.
+Every generation run appears in the run sheet, with In progress, History, and Diagnostics tabs. You can watch the output as it is written and cancel at any time. Model generation has no application-side time limit, including after one hour; the provider or network can still interrupt a request. A batch can be paused. If a run fails, the text written so far is kept as a recovery candidate that you can copy or discard.
 
 ![Run sheet writing chapter 3 with live output appearing sentence by sentence](docs/assets/readme/v130-en-run.webp)
 

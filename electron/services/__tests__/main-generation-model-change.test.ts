@@ -223,7 +223,7 @@ it('服务商流不合规被中止：调用记录仍是失败，不误记成已�
   expect(historyRows()).toMatchObject([{ purpose: 'plot-outline:chapter:1:normal', success: 0, finishReason: null }])
 })
 
-it('请求用完本次运行的总时长被中止：调用记录记为已取消，不记成服务商失败', async () => {
+it('超过一小时不会自动中止，手动取消后调用记录记为已取消', async () => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] })
   cleanups.push(() => vi.useRealTimers())
   const { dispatch, started } = providerLikeDispatch(), f = fixture(dispatch)
@@ -231,8 +231,13 @@ it('请求用完本次运行的总时长被中止：调用记录记为已取消�
   const pending = f.owner.execute({ handle: run.handle, invocationNonce: 'chapter-1', task: outlineTask(run.plotOutline!) }).catch(error => error)
   await started
 
-  await vi.advanceTimersByTimeAsync(3_600_000)
-  expect(JSON.stringify(await pending)).toContain('ROOT_BUDGET_EXHAUSTED')
+  let settled = false
+  void pending.then(() => { settled = true })
+  await vi.advanceTimersByTimeAsync(3_600_001)
+  expect(settled).toBe(false)
+  expect(historyRows()).toHaveLength(0)
+  f.owner.cancel(run.handle)
+  await pending
   vi.useRealTimers()
   await vi.waitFor(() => expect(historyRows()).toHaveLength(1))
 
